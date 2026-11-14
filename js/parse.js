@@ -416,7 +416,8 @@ const Parse = (() => {
 
   function detectKind(text, rows) {
     const t = text.toLowerCase();
-    if (/cibil|transunion|credit information report/.test(t) && /(member name|account type|ownership|date opened|sanctioned)/.test(t)) return 'cibil';
+    // Any credit bureau report (kind 'cibil' covers CIBIL, Experian, CRIF High Mark, Equifax).
+    if (/cibil|transunion|experian|crif|high\s?mark|equifax|credit information report/.test(t) && /(member name|lender|institution|credit grantor|account type|ownership|date opened|sanction)/.test(t) && /(score|credit (information )?report|\bcir\b)/.test(t)) return 'cibil';
     if (/paytm/.test(t) && !/paytm payments bank/.test(t)) return 'paytm';
     if (/credit card|card statement|minimum amount due|total amount due/.test(t)) return 'card';
     return 'bank';

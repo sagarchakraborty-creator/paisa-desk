@@ -1,6 +1,6 @@
 // Paisa Desk: the app. Data lives in `db`, encrypted at rest by Store. All statement text is untrusted, so it is escaped before display.
 'use strict';
-const APP_VERSION = '2026-11-14.2';
+const APP_VERSION = '2026-11-14.3';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-5);
@@ -20,7 +20,7 @@ let db = null;
 const ui = { tab: 'home', month: ymOf(today()), f: { q: '', acct: '', cat: '', type: '', month: '' }, limit: 150, pending: [], lockedAt: 0 };
 
 function newDb() {
-  return { v: 1, created: today(), accounts: [], txns: [], loans: [], cibil: { score: null, date: null, history: [] }, budgets: {}, rules: {}, assets: [], imports: [] };
+  return { v: 1, created: today(), accounts: [], txns: [], loans: [], scores: [], reports: [], loanIgnore: [], budgets: {}, rules: {}, assets: [], imports: [] };
 }
 
 /* ---------- save ---------- */
@@ -220,6 +220,12 @@ async function start() {
 function migrate() {
   const d = newDb();
   for (const k of Object.keys(d)) if (db[k] == null) db[k] = d[k];
+  // v1 kept only CIBIL: move its score history into the all-bureau list.
+  if (db.cibil) {
+    for (const h of db.cibil.history || []) if (!db.scores.some(s => s.bureau === 'CIBIL' && s.date === h.date)) db.scores.push({ bureau: 'CIBIL', date: h.date, score: h.score });
+    for (const h of db.cibil.history || []) if (!db.reports.some(r => r.bureau === 'CIBIL' && r.date === h.date)) db.reports.push({ bureau: 'CIBIL', date: h.date });
+    delete db.cibil;
+  }
 }
 
 /* ---------- render ---------- */
@@ -273,6 +279,11 @@ function alerts(s) {
   const lt = loanTotals();
   if (lt.overdue > 0) out.push(['bad', '🏦', `Loans show <b>${inr(lt.overdue)} overdue</b> in your CIBIL report. Clear it to protect your score.`]);
   if (lt.cardLim && lt.cardOut / lt.cardLim > 0.3) out.push(['warn', '💳', `Credit card use is ${pct(lt.cardOut / lt.cardLim)} of the limit. Under 30% is better for your score.`]);
+  const lr = lastReport();
+  if (!lr && (db.loans.length || db.txns.length)) out.push(['info', '📄', `Add a free credit report to see all your loans and your score. <button class="link" data-act="go" data-tab="loans">How</button>`]);
+  else if (lr && days(today(), lr.date) > 90) out.push(['warn', '🔄', `Your credit report is ${Math.round(days(today(), lr.date))} days old. <button class="link" data-act="go" data-tab="loans">Get a fresh free one</button>`]);
+  const notOnReport = bankLoans().filter(g => !g.onReport && !g.ignored).length;
+  if (notOnReport) out.push(['warn', '🏦', `${notOnReport} loan${notOnReport === 1 ? '' : 's'} in your bank statements ${notOnReport === 1 ? "isn't" : "aren't"} on your credit report. <button class="link" data-act="go" data-tab="loans">Check</button>`]);
   const unc = db.txns.filter(t => t.d.startsWith(ui.month) && catOf(t) === 'Others').length;
   if (unc >= 5) out.push(['info', '🏷️', `${unc} entries this month are in "Others". <button class="link" data-act="filterCat" data-cat="Others">Sort them</button> and the app will remember each merchant.`]);
   const guessN = db.txns.filter(t => t.guess).length;
@@ -406,7 +417,7 @@ function viewImport() {
   </div>
   <div id="pending">${ui.pending.map(pendingCard).join('')}</div>
   ${hist.length ? `<h2>Imported so far</h2><div class="card">${hist.map(h => `<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line)">
-    <div class="grow"><div class="ellip"><b>${esc(h.file)}</b></div><div class="tiny muted">${h.kind === 'cibil' ? `CIBIL · ${h.added} accounts` : `${dmy(h.from)} – ${dmy(h.to)} · ${h.added} added${h.merged ? `, ${h.merged} matched with Paytm` : ''}${h.skipped ? `, ${h.skipped} already there` : ''}`}</div></div>
+    <div class="grow"><div class="ellip"><b>${esc(h.file)}</b></div><div class="tiny muted">${h.kind === 'cibil' ? `${esc(h.bureau || 'CIBIL')} report · ${h.added} accounts` : `${dmy(h.from)} – ${dmy(h.to)} · ${h.added} added${h.merged ? `, ${h.merged} matched with Paytm` : ''}${h.skipped ? `, ${h.skipped} already there` : ''}`}</div></div>
     ${h.kind !== 'cibil' ? `<button class="btn sm" data-act="undoImp" data-id="${h.id}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
   <div class="card small muted"><b>Tips.</b> Excel/CSV downloads from net banking read most reliably. Locked PDFs ask for their password here; it is used only to open the file and is not saved. Importing the same statement twice is safe: repeats are skipped. Paytm entries paid from a linked bank account are matched to that bank's entries, not counted twice.</div>`;
 }
@@ -471,8 +482,8 @@ function pendingCard(p) {
   if (p.status === 'done') return '';
   if (p.cibil) {
     const c = p.cibil;
-    return `<div class="card prev"><div class="row between"><b class="ellip">${esc(p.name)}</b><span class="pill info">CIBIL report</span></div>
-      <dl class="kv" style="margin-top:8px"><dt>CIBIL score</dt><dd>${c.score ?? 'not found'}</dd><dt>Report date</dt><dd>${dmy(c.reportDate)}</dd><dt>Accounts found</dt><dd>${c.loans.length}</dd></dl>
+    return `<div class="card prev"><div class="row between"><b class="ellip">${esc(p.name)}</b><span class="pill info">${esc(p.cibil.bureau)} report</span></div>
+      <dl class="kv" style="margin-top:8px"><dt>${esc(c.bureau)} score</dt><dd>${c.score ?? 'not found'}</dd><dt>Report date</dt><dd>${dmy(c.reportDate)}</dd><dt>Accounts found</dt><dd>${c.loans.length}</dd></dl>
       ${c.loans.length ? `<div class="tbl-wrap"><table><tr class="muted"><td>Lender</td><td>Type</td><td class="r">Outstanding</td><td class="r">EMI</td></tr>${c.loans.map(l => `<tr><td>${esc(l.lender)}</td><td>${esc(l.type)}${l.status === 'closed' ? ' <span class="pill">closed</span>' : ''}</td><td class="r num">${l.outstanding != null ? inr(l.outstanding) : '–'}</td><td class="r num">${l.emi ? inr(l.emi) : '–'}</td></tr>`).join('')}</table></div>`
         : '<p class="small muted">No loan accounts could be read from this layout. You can still save the score and add loans by hand in the Loans tab.</p>'}
       <div class="row" style="margin-top:12px"><button class="btn" data-act="dropPend" data-id="${p.id}">Discard</button><span class="grow"></span><button class="btn pri" data-act="saveCibil" data-id="${p.id}">Save to Loans</button></div></div>`;
@@ -539,37 +550,139 @@ function commitImport(p) {
   save(); render();
   toast(`${added} added${merged ? `, ${merged} matched` : ''}${skipped ? `, ${skipped} already there` : ''}${xf ? `, ${xf} transfers paired` : ''}`, 4000);
 }
+/* ---------- credit reports: all bureaus into one loan list ---------- */
+const BUREAUS = [
+  { name: 'CIBIL', url: 'https://www.cibil.com/freecibilscore', how: 'Sign up with PAN and mobile OTP → Free annual report → download PDF.' },
+  { name: 'Experian', url: 'https://www.experian.in/', how: 'Get free credit report → mobile OTP → download PDF.' },
+  { name: 'CRIF High Mark', url: 'https://www.crifhighmark.com/', how: 'Free credit report → PAN + OTP → download PDF.' },
+  { name: 'Equifax', url: 'https://www.equifax.co.in/', how: 'Free credit report → PAN + OTP → download PDF.' },
+];
+// Brand names and the company names they show up as in bank narrations.
+const LENDER_ALIAS = { krazybee: 'kreditbee', whizdm: 'moneyview', akara: 'stashfin', social: 'fibe', earlysalary: 'fibe', onemi: 'kissht', krazy: 'kreditbee' };
+const lenderKey = s => {
+  const k = String(s || '').toLowerCase()
+    .replace(/\b(ltd|limited|pvt|private|bank|finance|financial|finserv|fin|services|co|company|india|the|corporation|corp|nbfc|housing|capital)\b/g, '')
+    .replace(/[^a-z0-9]/g, '');
+  for (const [a, b] of Object.entries(LENDER_ALIAS)) if (k.startsWith(a)) return b;
+  return k;
+};
+const lenderMatch = (a, b) => !!a && !!b && (a === b || a.startsWith(b) || b.startsWith(a) || (Math.min(a.length, b.length) >= 5 && (a.includes(b) || b.includes(a))));
+const last4 = s => String(s || '').replace(/\D/g, '').slice(-4);
+function sameLoan(a, b) {
+  const la = lenderKey(a.lender), lb = lenderKey(b.lender);
+  if (!lenderMatch(la, lb)) return false;
+  const a4 = last4(a.acct), b4 = last4(b.acct);
+  if (a4.length === 4 && b4.length === 4) return a4 === b4;
+  const ta = (a.type || '').toLowerCase().replace(/[^a-z]/g, ''), tb = (b.type || '').toLowerCase().replace(/[^a-z]/g, '');
+  if (ta && tb && ta !== tb) return false;
+  if (a.opened && b.opened) return a.opened === b.opened;
+  return true;
+}
+function latestScores() {
+  const by = {};
+  for (const s of db.scores) if (!by[s.bureau] || s.date > by[s.bureau].date) by[s.bureau] = s;
+  return Object.values(by).sort((a, b) => a.date < b.date ? 1 : -1);
+}
+function lastReport(bureau) { return db.reports.filter(r => !bureau || r.bureau === bureau).sort((a, b) => a.date < b.date ? 1 : -1)[0] || null; }
+const addDays = (d, n) => new Date(new Date(d).getTime() + n * 864e5).toISOString().slice(0, 10);
 function saveCibil(p) {
-  const c = p.cibil, at = c.reportDate || today();
-  if (c.score) { db.cibil.score = c.score; db.cibil.date = at; db.cibil.history = db.cibil.history.filter(h => h.date !== at); db.cibil.history.push({ date: at, score: c.score }); db.cibil.history.sort((a, b) => a.date < b.date ? -1 : 1); }
-  const k = l => `${(l.lender || '').toLowerCase().replace(/[^a-z]/g, '')}|${(l.acct || '').replace(/\D/g, '').slice(-4)}|${(l.type || '').toLowerCase()}`;
-  let n = 0;
+  const c = p.cibil, at = c.reportDate || today(), bu = c.bureau || 'CIBIL';
+  if (c.score) { db.scores = db.scores.filter(s => !(s.bureau === bu && s.date === at)); db.scores.push({ bureau: bu, date: at, score: c.score }); db.scores.sort((a, b) => a.date < b.date ? -1 : 1); }
+  db.reports = db.reports.filter(r => !(r.bureau === bu && r.date === at));
+  db.reports.push({ bureau: bu, date: at, file: p.name, n: c.loans.length });
+  let n = 0, added = 0;
   for (const l of c.loans) {
-    const ex = db.loans.find(x => k(x) === k(l));
-    if (ex) { for (const f of Object.keys(l)) if (l[f] != null && l[f] !== '') ex[f] = l[f]; ex.at = at; }
-    else db.loans.push({ id: uid(), ...l, at, src: 'cibil' });
+    const ex = db.loans.find(x => sameLoan(x, l));
+    if (ex) {
+      const newer = !ex.at || at >= ex.at;
+      for (const f of Object.keys(l)) if (l[f] != null && l[f] !== '' && (newer || ex[f] == null || ex[f] === '')) ex[f] = l[f];
+      if (newer) ex.at = at;
+      ex.seen = { ...(ex.seen || {}), [bu]: at };
+    } else { db.loans.push({ id: uid(), ...l, at, seen: { [bu]: at }, src: 'bureau' }); added++; }
     n++;
   }
-  db.imports.unshift({ id: uid(), file: p.name, at: today(), kind: 'cibil', added: n });
+  db.imports.unshift({ id: uid(), file: p.name, at: today(), kind: 'cibil', bureau: bu, added: n });
   ui.pending = ui.pending.filter(x => x !== p);
-  save(); go('loans'); toast(`CIBIL saved: ${c.score ? 'score ' + c.score + ', ' : ''}${n} accounts`);
+  save(); go('loans'); toast(`${bu} saved: ${c.score ? 'score ' + c.score + ', ' : ''}${n} accounts${n - added ? ` (${n - added} already known, updated)` : ''}`, 4000);
+}
+
+/* ---------- loans seen in bank statements ---------- */
+const LOAN_LENDERS = ['bajaj finance', 'bajaj finserv', 'kreditbee', 'krazybee', 'moneyview', 'money view', 'whizdm', 'navi finserv', 'navi', 'cashe', 'fibe', 'earlysalary',
+  'kissht', 'onemi', 'paysense', 'lazypay', 'mpokket', 'truebalance', 'stashfin', 'akara', 'zestmoney', 'freo', 'dhani', 'indiabulls', 'home credit', 'tata capital',
+  'hdb financial', 'hdbfs', 'aditya birla finance', 'abfl', 'l&t finance', 'lnt finance', 'fullerton', 'smfg', 'poonawalla', 'piramal', 'muthoot', 'manappuram', 'iifl',
+  'shriram', 'cholamandalam', 'mahindra finance', 'sundaram finance', 'idfc first', 'hero fincorp', 'incred', 'lendingkart', 'faircent', 'lendenclub', 'olyv', 'smartcoin',
+  'slice', 'kotak prime', 'lic housing', 'pnb housing', 'hdfc ltd', 'axis finance', 'icici home'];
+const LENDER_RE = new RegExp(`(^|[^a-z])(${LOAN_LENDERS.map(w => w.replace(/[.*+?^${}()|[\]\\&]/g, '\\$&')).join('|')})([^a-z]|$)`, 'i');
+const titleCase = s => s.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
+function bankLoans() {
+  const groups = {};
+  for (const t of db.txns) {
+    const desc = `${t.desc} ${t.pdesc || ''}`;
+    const m = desc.match(LENDER_RE);
+    const isDebit = t.amt < 0;
+    const looksEmi = isDebit && (catOf(t) === 'EMI & loans' || !!m || /\b(nach|ach\s?d|achdr|ecs|emi|loan)\b/i.test(desc)) && kindOf(t) === 'exp';
+    const looksPayout = !isDebit && t.amt >= 1000 && (!!m || /\b(disb|disbursal|disbursement|loan cr|loan credit|loan a\/c)\b/i.test(desc)) && kindOf(t) !== 'xfer';
+    if (!looksEmi && !looksPayout) continue;
+    const name = m ? titleCase(m[2]) : t.m;
+    const key = lenderKey(name) || Cat.key(t.m);
+    const g = groups[key] ||= { key, name, debits: [], payouts: [] };
+    (isDebit ? g.debits : g.payouts).push(t);
+  }
+  const out = [];
+  for (const g of Object.values(groups)) {
+    const months = new Set(g.debits.map(t => ymOf(t.d)));
+    // A loan needs either a payout, a known lender name, or a payment that repeats in 2+ months.
+    const named = LENDER_RE.test(g.name);
+    if (!g.payouts.length && !named && months.size < 2) continue;
+    const amts = g.debits.map(t => -t.amt).sort((a, b) => a - b);
+    const emi = amts.length ? amts[Math.floor(amts.length / 2)] : null;
+    const dates = [...g.debits, ...g.payouts].map(t => t.d).sort();
+    const payout = g.payouts.sort((a, b) => b.amt - a.amt)[0] || null;
+    const onReport = db.loans.find(l => {
+      if (lenderMatch(lenderKey(l.lender), g.key)) return true;
+      return emi && l.emi && Math.abs(l.emi - emi) <= Math.max(2, l.emi * 0.02);
+    });
+    out.push({ ...g, emi, months: months.size, first: dates[0], last: dates[dates.length - 1], payout, onReport, ignored: db.loanIgnore.includes(g.key) });
+  }
+  return out.sort((a, b) => a.last < b.last ? 1 : -1);
 }
 
 /* ---------- loans ---------- */
+function reportCard() {
+  const lr = lastReport();
+  const age = lr ? Math.round(days(today(), lr.date)) : null;
+  const rows = BUREAUS.map(b => {
+    const r = lastReport(b.name);
+    const free = !r || addDays(r.date, 365) <= today();
+    return `<div style="padding:9px 0;border-bottom:1px solid var(--line)"><div class="row between"><div class="grow"><b>${b.name}</b>
+      <div class="tiny muted">${r ? `Last report ${dmy(r.date)} · ` : 'No report yet · '}${free ? '<span style="color:var(--good);font-weight:600">free report available</span>' : `next free ${dmy(addDays(r.date, 365))}`}</div></div>
+      <a class="btn sm" href="${b.url}" target="_blank" rel="noopener noreferrer">Open site ↗</a></div>
+      <div class="tiny muted" style="margin-top:3px">${b.how}</div></div>`;
+  }).join('');
+  return `<div class="card"><div class="row between"><h3 style="margin:0">Refresh credit report</h3>${lr ? `<span class="pill ${age > 90 ? 'warn' : 'good'}">${age} days old</span>` : '<span class="pill warn">none yet</span>'}</div>
+    <p class="small muted" style="margin:6px 0 4px">Every bureau lists all your loans, including loan apps. Each gives one free full report a year, so take them in turns: one every 3 months keeps your list fresh for free.</p>
+    ${rows}
+    <p class="small" style="margin:10px 0 0"><b>Then:</b> open the downloaded PDF and tap <b>Share → Paisa Desk</b>, or use <button class="link" data-act="go" data-tab="import">Import</button>. Reports from different bureaus are merged into one loan list.</p></div>`;
+}
 function viewLoans() {
-  const lt = loanTotals(), c = db.cibil, inc = avgIncome();
+  const lt = loanTotals(), inc = avgIncome();
   const foir = inc ? lt.emi / inc : NaN;
-  const hist = c.history || [];
-  const prev = hist.length > 1 ? hist[hist.length - 2].score : null;
-  const sc = c.score, band = !sc ? '' : sc >= 750 ? 'good' : sc >= 650 ? 'warn' : 'bad';
+  const ls = latestScores(), top = ls[0] || null;
+  const hist = top ? db.scores.filter(s => s.bureau === top.bureau) : [];
+  const prev = hist.length > 1 ? hist[hist.length - 2] : null;
+  const sc = top?.score, band = !sc ? '' : sc >= 750 ? 'good' : sc >= 650 ? 'warn' : 'bad';
   const bandTxt = !sc ? '' : sc >= 750 ? 'Good' : sc >= 650 ? 'Fair' : 'Needs work';
   const deg = sc ? Math.round((sc - 300) / 600 * 360) : 0;
   const closed = db.loans.filter(l => l.status === 'closed');
-  return `<div class="card score">
-      <div class="gauge" style="background:conic-gradient(var(--${band || 'line'}) ${deg}deg, var(--line) 0)"><div style="background:var(--card);width:74px;height:74px;border-radius:50%;display:grid;place-items:center"><div><b>${sc ?? '–'}</b><span>CIBIL</span></div></div></div>
-      <div class="grow">${sc ? `<div><span class="pill ${band}">${bandTxt}</span> ${prev ? `<span class="small muted">${sc >= prev ? '▲' : '▼'} ${Math.abs(sc - prev)} since ${dmy(hist[hist.length - 2].date)}</span>` : ''}</div>
-        <div class="small muted" style="margin-top:6px">From report dated ${dmy(c.date)}. Score range 300–900; 750+ gets the best loan rates.</div>`
-        : `<div class="small">No CIBIL report yet. Download it free once a year from the CIBIL website (or your bank / Paytm app), then import the PDF here.</div><button class="btn sm" style="margin-top:8px" data-act="go" data-tab="import">Import CIBIL PDF</button>`}</div></div>
+  const lr = lastReport(), stale = !lr || days(today(), lr.date) > 90;
+  const bl = bankLoans(), missing = bl.filter(g => !g.onReport && !g.ignored);
+  return `${stale ? `<div class="alert warn"><span class="ic">🔄</span><div>${lr ? `Your latest credit report is ${Math.round(days(today(), lr.date))} days old.` : 'No credit report imported yet.'} Get a fresh free one below to see every loan and your current score.</div></div>` : ''}
+    <div class="card score">
+      <div class="gauge" style="background:conic-gradient(var(--${band || 'line'}) ${deg}deg, var(--line) 0)"><div style="background:var(--card);width:74px;height:74px;border-radius:50%;display:grid;place-items:center"><div><b>${sc ?? '–'}</b><span>${esc(top?.bureau === 'CRIF High Mark' ? 'CRIF' : top?.bureau || 'Score')}</span></div></div></div>
+      <div class="grow">${sc ? `<div><span class="pill ${band}">${bandTxt}</span> ${prev ? `<span class="small muted">${sc >= prev.score ? '▲' : '▼'} ${Math.abs(sc - prev.score)} since ${dmy(prev.date)}</span>` : ''}</div>
+        <div class="small muted" style="margin-top:6px">${esc(top.bureau)} report dated ${dmy(top.date)}. Range 300–900; 750+ gets the best rates.</div>
+        ${ls.length > 1 ? `<div class="small" style="margin-top:6px">${ls.slice(1).map(s => `${esc(s.bureau)} <b>${s.score}</b> <span class="muted">(${dmy(s.date)})</span>`).join(' · ')}</div>` : ''}`
+        : `<div class="small">No credit score yet. Use the free reports below, then import the PDF.</div>`}</div></div>
     <div class="tiles">
       <div class="tile"><div class="k">Loans outstanding</div><div class="v num">${inrC(lt.out)}</div><div class="s">${lt.loans.length} open loan${lt.loans.length === 1 ? "" : "s"}</div></div>
       <div class="tile"><div class="k">EMI per month</div><div class="v num">${inrC(lt.emi)}</div><div class="s">${isFinite(foir) ? `${pct(foir)} of income` : 'add income to compare'}</div></div>
@@ -579,7 +692,14 @@ function viewLoans() {
     ${isFinite(foir) && foir > 0.5 ? `<div class="alert bad"><span class="ic">⚠️</span><div>EMIs take ${pct(foir)} of your income. Lenders usually want this under 50%.</div></div>` : ''}
     <div class="row between"><h2>Open loans & cards</h2><button class="btn sm" data-act="loanEdit">＋ Add</button></div>
     ${openLoans().length ? openLoans().map(loanCard).join('') : '<div class="card muted small">No open loans recorded.</div>'}
-    ${closed.length ? `<details class="card"><summary><b>Closed accounts (${closed.length})</b></summary>${closed.map(l => `<div class="row between small" style="padding:6px 0;border-bottom:1px solid var(--line)"><span>${esc(l.lender)} · ${esc(l.type)}</span><span class="muted">${l.closed ? 'closed ' + dmy(l.closed) : ''} <button class="link" data-act="loanEdit" data-id="${l.id}">Edit</button></span></div>`).join('')}</details>` : ''}`;
+    ${missing.length ? `<h2>Found in your bank, not on your credit report</h2>
+      <p class="small muted" style="margin-top:-4px">Loan payments or payouts in your statements that don't match any loan above. New loans take 30–45 days to reach the bureaus; if it's older than that, check with the lender.</p>
+      ${missing.map(g => `<div class="card"><div class="row between"><b>${esc(g.name)}</b><span class="pill warn">not on report</span></div>
+        <div class="small muted" style="margin-top:4px">${g.debits.length ? `${inr(g.emi)} paid ${g.debits.length === 1 ? 'once' : `${g.debits.length} times over ${g.months} month${g.months === 1 ? '' : 's'}`}` : ''}${g.debits.length && g.payout ? ' · ' : ''}${g.payout ? `${inr(g.payout.amt)} received ${dmy(g.payout.d)}` : ''} · ${dmy(g.first)} – ${dmy(g.last)}</div>
+        <div class="row" style="margin-top:10px"><button class="btn sm" data-act="bankLoanIgnore" data-k="${esc(g.key)}">Not a loan</button><span class="grow"></span><button class="btn sm pri" data-act="bankLoanAdd" data-k="${esc(g.key)}">Add as loan</button></div></div>`).join('')}` : ''}
+    ${reportCard()}
+    ${closed.length ? `<details class="card"><summary><b>Closed accounts (${closed.length})</b></summary>${closed.map(l => `<div class="row between small" style="padding:6px 0;border-bottom:1px solid var(--line)"><span>${esc(l.lender)} · ${esc(l.type)}</span><span class="muted">${l.closed ? 'closed ' + dmy(l.closed) : ''} <button class="link" data-act="loanEdit" data-id="${l.id}">Edit</button></span></div>`).join('')}</details>` : ''}
+    ${db.loanIgnore.length ? `<p class="tiny muted">${db.loanIgnore.length} bank payee${db.loanIgnore.length === 1 ? '' : 's'} marked "not a loan". <button class="link" data-act="bankLoanReset">Show again</button></p>` : ''}`;
 }
 function loanCard(l) {
   const repaid = l.sanctioned && l.outstanding != null && !l.isCard ? Math.max(0, Math.min(1, 1 - l.outstanding / l.sanctioned)) : null;
@@ -596,10 +716,10 @@ function loanCard(l) {
       <div><span>EMI</span><b class="num">${l.emi ? inr(l.emi) : '–'}</b></div>
       <div><span>${l.isCard ? 'Limit' : 'Rate'}</span><b class="num">${l.isCard ? (l.limit ? inr(l.limit) : '–') : (l.rate ? l.rate + '%' : '–')}</b></div>
     </div>
-    <div class="tiny muted" style="margin-top:8px">${left ? `About ${left} EMIs left. ` : ''}${seen.n ? `EMI seen in your bank ${seen.n === 1 ? "once" : seen.n + " times"} in 6 months, last on ${dmy(seen.last)}.` : (l.emi && db.txns.length ? 'No matching EMI found in imported bank statements.' : '')}${l.at ? ` CIBIL as of ${dmy(l.at)}.` : ''}</div></div>`;
+    <div class="tiny muted" style="margin-top:8px">${left ? `About ${left} EMIs left. ` : ''}${seen.n ? `EMI seen in your bank ${seen.n === 1 ? "once" : seen.n + " times"} in 6 months, last on ${dmy(seen.last)}.` : (l.emi && db.txns.length ? 'No matching EMI found in imported bank statements.' : '')}${l.seen && Object.keys(l.seen).length ? ` On ${Object.keys(l.seen).map(esc).join(', ')} report${Object.keys(l.seen).length > 1 ? 's' : ''}, latest ${dmy(l.at)}.` : l.at ? ` Report as of ${dmy(l.at)}.` : l.src === 'manual' ? ' Added by you.' : ''}</div></div>`;
 }
-function loanSheet(id) {
-  const l = id ? db.loans.find(x => x.id === id) : { lender: '', type: 'Personal Loan', status: 'open' };
+function loanSheet(id, preset) {
+  const l = id ? db.loans.find(x => x.id === id) : { lender: '', type: 'Personal Loan', status: 'open', ...(preset || {}) };
   const f = (k, lab, type = 'text', ph = '') => `<div><label class="f">${lab}</label><input type="${type}" id="L_${k}" value="${esc(l[k] ?? '')}" placeholder="${ph}" ${type === 'number' ? 'inputmode="decimal" step="any"' : ''}></div>`;
   openSheet(`<h3>${id ? 'Edit' : 'Add'} loan or card</h3>
     ${f('lender', 'Lender', 'text', 'e.g. HDFC Bank')}
@@ -738,6 +858,12 @@ document.addEventListener('click', async e => {
       save(); render(); break;
     }
     case 'loanEdit': loanSheet(id); break;
+    case 'bankLoanAdd': {
+      const g = bankLoans().find(x => x.key === el.dataset.k); if (!g) break;
+      loanSheet(null, { lender: g.name, type: 'Personal Loan', emi: g.emi, sanctioned: g.payout?.amt ?? null, opened: g.payout?.d || g.first }); break;
+    }
+    case 'bankLoanIgnore': if (!db.loanIgnore.includes(el.dataset.k)) db.loanIgnore.push(el.dataset.k); save(); render(); break;
+    case 'bankLoanReset': db.loanIgnore = []; save(); render(); break;
     case 'loanSave': loanSave(id); break;
     case 'loanDel': if (confirm('Delete this loan?')) { db.loans = db.loans.filter(l => l.id !== id); save(); closeSheet(); render(); } break;
     case 'autoBudget': {

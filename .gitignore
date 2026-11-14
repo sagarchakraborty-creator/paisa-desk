@@ -1,0 +1,7 @@
+# Never commit statements, reports or backups.
+*.pdf
+*.xlsx
+*.xls
+*.csv
+paisa-desk-backup-*.json
+test-data/

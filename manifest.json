@@ -1,0 +1,30 @@
+{
+  "name": "Paisa Desk",
+  "short_name": "Paisa Desk",
+  "description": "Spends, budgets, loans and net worth from your bank, Paytm and CIBIL statements. Read and stored only on your device, encrypted.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4f6f9",
+  "theme_color": "#1f4e79",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "share_target": {
+    "action": "./share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [{ "name": "files", "accept": ["application/pdf", ".pdf", "text/csv", ".csv", "application/vnd.ms-excel", ".xls", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"] }]
+    }
+  },
+  "shortcuts": [
+    { "name": "Import statement", "url": "./#import", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Spends", "url": "./#spends", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

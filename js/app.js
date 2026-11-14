@@ -1,6 +1,6 @@
 // Paisa Desk: the app. Data lives in `db`, encrypted at rest by Store. All statement text is untrusted, so it is escaped before display.
 'use strict';
-const APP_VERSION = '2026-11-14.3';
+const APP_VERSION = '2026-11-14.4';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-5);
@@ -17,10 +17,10 @@ const dmy = d => d ? `${+d.slice(8)} ${MN[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`
 const days = (a, b) => Math.abs((new Date(a) - new Date(b)) / 864e5);
 
 let db = null;
-const ui = { tab: 'home', month: ymOf(today()), f: { q: '', acct: '', cat: '', type: '', month: '' }, limit: 150, pending: [], lockedAt: 0 };
+const ui = { tab: 'home', month: ymOf(today()), f: { q: '', acct: '', cat: '', type: '', month: '' }, limit: 150, pending: [], lockedAt: 0, gmail: { months: 6, extra: '', status: 'idle', items: [], sel: new Set(), err: '', progress: '' } };
 
 function newDb() {
-  return { v: 1, created: today(), accounts: [], txns: [], loans: [], scores: [], reports: [], loanIgnore: [], budgets: {}, rules: {}, assets: [], imports: [] };
+  return { v: 1, created: today(), accounts: [], txns: [], loans: [], scores: [], reports: [], loanIgnore: [], gmail: { clientId: '', fetched: [] }, pdfPw: {}, budgets: {}, rules: {}, assets: [], imports: [] };
 }
 
 /* ---------- save ---------- */
@@ -416,10 +416,12 @@ function viewImport() {
     <p class="tiny muted" style="margin:12px 0 0">Read on this device only, nothing is uploaded. On Android you can also use <b>Share → Paisa Desk</b> on a statement in Gmail or Files.</p>
   </div>
   <div id="pending">${ui.pending.map(pendingCard).join('')}</div>
+  <h2>📧 Find statements in Gmail</h2>
+  <div class="card" id="gmailCard">${gmailCard()}</div>
   ${hist.length ? `<h2>Imported so far</h2><div class="card">${hist.map(h => `<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line)">
     <div class="grow"><div class="ellip"><b>${esc(h.file)}</b></div><div class="tiny muted">${h.kind === 'cibil' ? `${esc(h.bureau || 'CIBIL')} report · ${h.added} accounts` : `${dmy(h.from)} – ${dmy(h.to)} · ${h.added} added${h.merged ? `, ${h.merged} matched with Paytm` : ''}${h.skipped ? `, ${h.skipped} already there` : ''}`}</div></div>
     ${h.kind !== 'cibil' ? `<button class="btn sm" data-act="undoImp" data-id="${h.id}">Remove</button>` : ''}</div>`).join('')}</div>` : ''}
-  <div class="card small muted"><b>Tips.</b> Excel/CSV downloads from net banking read most reliably. Locked PDFs ask for their password here; it is used only to open the file and is not saved. Importing the same statement twice is safe: repeats are skipped. Paytm entries paid from a linked bank account are matched to that bank's entries, not counted twice.</div>`;
+  <div class="card small muted"><b>Tips.</b> Excel/CSV downloads from net banking read most reliably. Locked PDFs ask for their password here; it is saved (encrypted, on this device) only if you tick "remember". Importing the same statement twice is safe: repeats are skipped. Paytm entries paid from a linked bank account are matched to that bank's entries, not counted twice.</div>`;
 }
 function bindImport() {
   const inp = $('#files'), drop = $('#drop');
@@ -429,18 +431,113 @@ function bindImport() {
   drop.ondragleave = () => drop.classList.remove('over');
   drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); handleFiles([...e.dataTransfer.files]); };
 }
+/* ---------- Gmail ---------- */
+const gKey = it => `${it.msgId}:${it.name}`;
+function gmailCard() {
+  const g = ui.gmail, cid = db.gmail.clientId;
+  if (!cid) return `<p class="small" style="margin-top:0">Search your Gmail for bank, Paytm, credit card and credit-report statements and pull the attachments straight into the app. Mail goes from Google to this device only; read-only access, nothing is changed in your mailbox.</p>
+    <button class="btn pri" data-act="gmailSetup">Set up Gmail (one time, about 10 min)</button>`;
+  Gmail.preload().catch(() => {});
+  const busy = ['signing', 'searching', 'fetching'].includes(g.status);
+  let h = `<div class="chips">${[[3, '3 months'], [6, '6 months'], [12, '1 year'], [24, '2 years']].map(([m, l]) => `<button class="chip ${g.months === m ? 'on' : ''}" data-act="gmailMonths" data-m="${m}">${l}</button>`).join('')}</div>
+    <input type="search" id="gmailExtra" placeholder="Optional own search, e.g. from:hdfcbank.net" value="${esc(g.extra)}" style="margin-top:8px">
+    <div class="row" style="margin-top:8px"><button class="btn pri" data-act="gmailSearch" ${busy ? 'disabled' : ''}>${Gmail.signedIn ? '🔎 Search Gmail' : '🔎 Sign in & search'}</button><span class="grow"></span><button class="link" data-act="gmailSetup">Gmail settings</button></div>`;
+  if (g.status === 'signing') h += '<p class="small muted">Waiting for Google sign-in…</p>';
+  if (g.status === 'searching') h += `<p class="small muted">Searching… ${esc(g.progress || '')}</p>`;
+  if (g.status === 'fetching') h += `<p class="small muted">Downloading ${esc(g.progress || '')}…</p>`;
+  if (g.status === 'error') h += `<div class="alert bad small" style="margin:10px 0 0"><span class="ic">⚠️</span><div>${esc(g.err)}</div></div>`;
+  if (g.status === 'done' || (g.items.length && g.status !== 'searching')) {
+    if (!g.items.length) h += '<p class="small muted">No statement attachments found for this period. Try a longer period or your own search (for example the bank\'s email address).</p>';
+    else {
+      const n = g.sel.size;
+      h += `<div class="row between small" style="margin-top:12px"><b>${g.items.length} attachment${g.items.length === 1 ? '' : 's'} found</b><span><button class="link" data-act="gmailAll">Select new</button> · <button class="link" data-act="gmailNone">None</button></span></div>
+      <div style="max-height:360px;overflow:auto;margin-top:4px">${g.items.map((it, i) => {
+        const done = db.gmail.fetched.includes(gKey(it));
+        return `<label class="row" style="padding:8px 0;border-bottom:1px solid var(--line);align-items:flex-start;cursor:pointer"><input type="checkbox" data-act="gmailPick" data-i="${i}" ${g.sel.has(i) ? 'checked' : ''} style="width:20px;height:20px;margin-top:2px;flex:none">
+          <span class="grow" style="min-width:0"><span class="ellip" style="display:block;font-weight:600">${esc(it.name)}</span><span class="tiny muted ellip" style="display:block">${esc(it.from.name)} · ${dmy(it.date)}</span><span class="tiny muted ellip" style="display:block">${esc(it.subject)}</span></span>
+          <span class="tiny muted right" style="flex:none">${Math.max(1, Math.round(it.size * 0.75 / 1024))} KB${done ? '<br><span class="pill good">imported</span>' : ''}</span></label>`;
+      }).join('')}</div>
+      <button class="btn pri block" style="margin-top:10px" data-act="gmailImport" ${n && !busy ? '' : 'disabled'}>Import ${n} selected</button>`;
+    }
+  }
+  return h;
+}
+function refreshGmail() { const c = $('#gmailCard'); if (c) c.innerHTML = gmailCard(); }
+async function gmailSearch() {
+  const g = ui.gmail;
+  g.extra = $('#gmailExtra')?.value || '';
+  g.err = ''; g.status = 'signing'; refreshGmail();
+  try {
+    await Gmail.signIn(db.gmail.clientId);
+    g.status = 'searching'; g.progress = ''; refreshGmail();
+    const r = await Gmail.search(g.months, g.extra, (a, b) => { g.progress = `${a} of ${b} emails`; refreshGmail(); });
+    g.items = r.items.sort((a, b) => a.date < b.date ? 1 : -1);
+    g.sel = new Set(g.items.map((_, i) => i).filter(i => !db.gmail.fetched.includes(gKey(g.items[i]))));
+    g.status = 'done';
+  } catch (e) { g.status = 'error'; g.err = e.message || String(e); }
+  refreshGmail();
+}
+async function gmailImport() {
+  const g = ui.gmail, picks = [...g.sel].sort((a, b) => a - b).map(i => g.items[i]);
+  g.status = 'fetching'; const files = []; const fails = [];
+  for (let i = 0; i < picks.length; i++) {
+    g.progress = `${i + 1} of ${picks.length}`; refreshGmail();
+    try { files.push(await Gmail.download(picks[i])); if (!db.gmail.fetched.includes(gKey(picks[i]))) db.gmail.fetched.push(gKey(picks[i])); }
+    catch (e) { fails.push(`${picks[i].name}: ${e.message}`); }
+  }
+  db.gmail.fetched = db.gmail.fetched.slice(-2000);
+  save();
+  g.sel = new Set(); g.status = fails.length ? 'error' : 'done'; g.err = fails.length ? `Could not download ${fails.length}: ${fails.join('; ')}` : '';
+  refreshGmail();
+  $('#pending')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  await handleFiles(files);
+}
+function gmailSetupSheet() {
+  const origin = location.origin;
+  openSheet(`<h3>📧 Connect Gmail</h3>
+    <p class="small muted">Google only lets an app read Gmail if it is registered under your own Google account. You do this once, on a laptop is easiest. It's free.</p>
+    <ol class="small" style="padding-left:18px;line-height:1.55">
+      <li>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener noreferrer">Google Cloud → New project</a>. Name it <b>Paisa Desk</b> → Create.</li>
+      <li>Open <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener noreferrer">Gmail API</a> (check the project picker says Paisa Desk) → <b>Enable</b>.</li>
+      <li>Open <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener noreferrer">Google Auth Platform</a> → <b>Get started</b>. App name <b>Paisa Desk</b>, your email as support email → Audience <b>External</b> → your email as contact → agree → Create.</li>
+      <li>Go to <b>Audience</b> → <b>Test users</b> → <b>Add users</b> → add your own Gmail address → Save.</li>
+      <li>Go to <b>Clients</b> → <b>Create client</b> → type <b>Web application</b>, name Paisa Desk. Under <b>Authorised JavaScript origins</b> add:<br><code style="user-select:all">https://sagarchakraborty-creator.github.io</code>${origin !== 'https://sagarchakraborty-creator.github.io' ? `<br>and <code style="user-select:all">${esc(origin)}</code>` : ''}<br>Leave redirect URIs empty → Create.</li>
+      <li>Copy the <b>Client ID</b> (ends in <code>.apps.googleusercontent.com</code>) and paste it below.</li>
+    </ol>
+    <label class="f">Client ID</label><input type="text" id="gcid" value="${esc(db.gmail.clientId)}" placeholder="1234…apps.googleusercontent.com" autocomplete="off" spellcheck="false">
+    <p class="tiny muted">When you sign in, Google will say <b>"Google hasn't verified this app"</b>: that's because it's your private app. Tap <b>Continue</b>, then allow <b>read your email</b>. Access lasts about an hour each time and is read-only.</p>
+    ${Object.keys(db.pdfPw || {}).length ? `<p class="small">${Object.keys(db.pdfPw).length} saved PDF password${Object.keys(db.pdfPw).length === 1 ? '' : 's'} (${Object.keys(db.pdfPw).map(esc).join(', ')}). <button class="link" data-act="pwClear">Forget them</button></p>` : ''}
+    <div class="row" style="margin-top:12px">${db.gmail.clientId ? '<button class="btn danger" data-act="gmailForget">Disconnect</button>' : ''}<span class="grow"></span><button class="btn pri" data-act="gmailSaveId">Save</button></div>`);
+}
+
 function refreshPending() { const p = $('#pending'); if (p) p.innerHTML = ui.pending.map(pendingCard).join(''); }
 
-function askPdfPassword(name, wrong) {
+function askPdfPassword(name, wrong, sender) {
   return new Promise(res => {
     openSheet(`<h3>🔐 ${esc(name)} is locked</h3>
-      <p class="small muted">${wrong ? '<b style="color:var(--bad)">That password did not work.</b> ' : ''}Banks usually use something like your customer ID, date of birth (DDMMYYYY) or the first letters of your name plus DOB. It opens the file on this device and is not saved.</p>
+      <p class="small muted">${wrong ? '<b style="color:var(--bad)">That password did not work.</b> ' : ''}Banks usually use something like your customer ID, date of birth (DDMMYYYY) or the first letters of your name plus DOB.</p>
       <form id="pwF"><input type="password" id="pdfPw" placeholder="PDF password" autocomplete="off">
-      <div class="row" style="margin-top:12px"><button type="button" class="btn" id="pwSkip">Skip file</button><span class="grow"></span><button class="btn pri">Open</button></div></form>`, () => res(null));
+      <label class="switch"><input type="checkbox" id="pwRem" checked> Remember it${sender ? ` for statements from ${esc(sender)}` : ''} (kept encrypted on this device)</label>
+      <div class="row" style="margin-top:6px"><button type="button" class="btn" id="pwSkip">Skip file</button><span class="grow"></span><button class="btn pri">Open</button></div></form>`, () => res(null));
     setTimeout(() => $('#pdfPw')?.focus(), 50);
-    $('#pwF').onsubmit = e => { e.preventDefault(); const v = $('#pdfPw').value; closeSheet(true); res(v); };
+    $('#pwF').onsubmit = e => { e.preventDefault(); const v = $('#pdfPw').value, rem = $('#pwRem').checked; closeSheet(true); res({ pw: v, remember: rem }); };
     $('#pwSkip').onclick = () => { closeSheet(true); res(null); };
   });
+}
+// Locked PDFs: silently try the password saved for this sender, then other saved ones, then ask.
+function passwordAsker(f) {
+  const sender = f.sender || '';
+  const saved = db.pdfPw || {};
+  const tries = [...new Set([saved[sender], ...Object.values(saved)].filter(Boolean))];
+  let lastAsked = null;
+  return async (name, wrong) => {
+    if (tries.length) return tries.shift();
+    const r = await askPdfPassword(name, wrong && lastAsked != null, sender);
+    if (!r) return null;
+    lastAsked = r.pw;
+    if (r.remember) { db.pdfPw = { ...(db.pdfPw || {}), [sender || 'manual']: r.pw }; save(); }
+    return r.pw;
+  };
 }
 
 async function handleFiles(files) {
@@ -448,7 +545,7 @@ async function handleFiles(files) {
     const p = { id: uid(), name: f.name, status: 'reading' };
     ui.pending.push(p); refreshPending();
     try {
-      const res = await Parse.file(f, askPdfPassword);
+      const res = await Parse.file(f, passwordAsker(f));
       p.res = res;
       if (res.kind === 'cibil') { p.cibil = Cibil.read(res.lines); delete res.lines; }
       else setupMapping(p);
@@ -845,6 +942,20 @@ document.addEventListener('click', async e => {
     case 'okSign': { const t = db.txns.find(x => x.id === id); t.guess = false; save(); txSheet(id); render(); break; }
     case 'unpair': { const t = db.txns.find(x => x.id === id), p = db.txns.find(x => x.id === t.pair); for (const x of [t, p]) if (x) { x.xf = null; x.pair = null; x.noX = true; } save(); txSheet(id); render(); break; }
     case 'dropPend': ui.pending = ui.pending.filter(p => p.id !== id); refreshPending(); break;
+    case 'gmailSetup': gmailSetupSheet(); break;
+    case 'gmailSaveId': {
+      const v = $('#gcid').value.trim();
+      if (v && !/^[\w-]+\.apps\.googleusercontent\.com$/.test(v)) { toast('That doesn\'t look like a Client ID. It ends in .apps.googleusercontent.com'); break; }
+      if (v !== db.gmail.clientId) Gmail.signOut();
+      db.gmail.clientId = v; save(); closeSheet(); render(); toast(v ? 'Gmail connected. Tap Sign in & search.' : 'Gmail settings saved'); break;
+    }
+    case 'gmailForget': Gmail.signOut(); db.gmail.clientId = ''; ui.gmail.items = []; ui.gmail.status = 'idle'; save(); closeSheet(); render(); break;
+    case 'pwClear': db.pdfPw = {}; save(); gmailSetupSheet(); break;
+    case 'gmailMonths': ui.gmail.months = +el.dataset.m; ui.gmail.extra = $('#gmailExtra')?.value || ''; refreshGmail(); break;
+    case 'gmailSearch': gmailSearch(); break;
+    case 'gmailImport': gmailImport(); break;
+    case 'gmailAll': ui.gmail.sel = new Set(ui.gmail.items.map((_, i) => i).filter(i => !db.gmail.fetched.includes(gKey(ui.gmail.items[i])))); refreshGmail(); break;
+    case 'gmailNone': ui.gmail.sel = new Set(); refreshGmail(); break;
     case 'commit': commitImport(pend()); break;
     case 'saveCibil': saveCibil(pend()); break;
     case 'undoImp': {
@@ -922,6 +1033,7 @@ document.addEventListener('change', e => {
   const p = ui.pending.find(x => x.id === el.dataset.id);
   if (el.dataset.act === 'mapSel' && p) { p.map[el.dataset.hint].to = el.value; refreshPending(); }
   if (el.dataset.act === 'mapType' && p) p.map[el.dataset.hint].type = el.value;
+  if (el.dataset.act === 'gmailPick') { const i = +el.dataset.i; el.checked ? ui.gmail.sel.add(i) : ui.gmail.sel.delete(i); const b = document.querySelector('[data-act="gmailImport"]'); if (b) { b.textContent = `Import ${ui.gmail.sel.size} selected`; b.disabled = !ui.gmail.sel.size; } }
   if (el.dataset.act === 'budget') { const v = +el.value; if (v > 0) db.budgets[el.dataset.cat] = v; else delete db.budgets[el.dataset.cat]; save(); render(); }
 });
 document.addEventListener('input', e => {

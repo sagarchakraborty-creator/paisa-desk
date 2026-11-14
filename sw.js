@@ -1,8 +1,8 @@
 // Paisa Desk service worker: offline app shell + Android "Share to Paisa Desk" for statement files.
 // Bump VERSION on every release, or phones keep the old copy. No financial data is ever cached here.
-const VERSION = '2026-11-14.3';
+const VERSION = '2026-11-14.4';
 const SHELL = `paisadesk-shell-${VERSION}`;
-const FILES = ['./', 'index.html', 'styles.css', 'manifest.json', 'js/app.js', 'js/parse.js', 'js/cibil.js', 'js/cat.js', 'js/store.js',
+const FILES = ['./', 'index.html', 'styles.css', 'manifest.json', 'js/app.js', 'js/parse.js', 'js/cibil.js', 'js/cat.js', 'js/store.js', 'js/gmail.js',
   'vendor/pdf.min.js', 'vendor/pdf.worker.min.js', 'vendor/xlsx.full.min.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-512-maskable.png'];
 

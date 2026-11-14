@@ -1,6 +1,6 @@
 // Paisa Desk: the app. Data lives in `db`, encrypted at rest by Store. All statement text is untrusted, so it is escaped before display.
 'use strict';
-const APP_VERSION = '2026-11-14.1';
+const APP_VERSION = '2026-11-14.2';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-5);
@@ -168,7 +168,40 @@ async function showLock() {
       } catch (ex) { err(/decrypt|operation/i.test(ex.message + ex.name) ? 'Wrong passcode for that backup.' : ex.message); }
     };
   }
+  if (!isInstalled()) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn'; b.id = 'installBtn';
+    b.style.cssText = 'margin-top:18px;background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.35)';
+    b.textContent = '📲 Install on this phone';
+    b.onclick = installApp;
+    $('#lockForm').appendChild(b);
+  }
   setTimeout(() => $('#p1')?.focus(), 50);
+}
+
+/* ---------- install ---------- */
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
+window.addEventListener('appinstalled', () => { installEvt = null; $('#installBtn')?.remove(); toast('Installed. Open Paisa Desk from your home screen.'); });
+const isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+async function installApp() {
+  if (installEvt) { installEvt.prompt(); const r = await installEvt.userChoice; if (r.outcome === 'accepted') installEvt = null; return; }
+  const ua = navigator.userAgent;
+  const ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  const inApp = /; wv\)|FBAN|FBAV|Instagram|Line\/|GSA\/|WhatsApp|LinkedInApp|Twitter/i.test(ua) || (ios && !/Safari\//.test(ua)) || (ios && /CriOS|FxiOS|EdgiOS/.test(ua));
+  const link = location.href.split('#')[0];
+  let steps;
+  if (inApp && !ios) steps = `<p>This page is open inside another app (Gmail, WhatsApp…), which can't install apps.</p>
+    <ol><li>Tap <b>⋮</b> (top right) → <b>Open in Chrome</b>.<br><span class="tiny muted">Or copy the link below and paste it in Chrome.</span></li><li>In Chrome tap <b>⋮</b> → <b>Install app</b> (or <b>Add to Home screen</b> → <b>Install</b>).</li></ol>`;
+  else if (ios && (inApp || !/Safari\//.test(ua) || /CriOS|FxiOS|EdgiOS/.test(ua))) steps = `<p>On iPhone, only <b>Safari</b> can add apps to the home screen.</p>
+    <ol><li>Copy the link below and open it in <b>Safari</b>.</li><li>Tap the <b>Share</b> button (square with ↑ arrow at the bottom).</li><li>Scroll down, tap <b>Add to Home Screen</b> → <b>Add</b>.</li></ol>`;
+  else if (ios) steps = `<ol><li>Tap the <b>Share</b> button (square with ↑ arrow, bottom bar of Safari).</li><li>Scroll down and tap <b>Add to Home Screen</b>.</li><li>Tap <b>Add</b>. Paisa Desk appears on your home screen.</li></ol>`;
+  else steps = `<ol><li>Tap Chrome's <b>⋮</b> menu (top right).</li><li>Tap <b>Install app</b>. If you only see <b>Add to Home screen</b>, tap it, then <b>Install</b>.</li><li>Open Paisa Desk from your home screen or app drawer.</li></ol>
+    <p class="tiny muted">Not in the menu? Make sure this is Chrome (not the Gmail/WhatsApp viewer), then reload the page once and try again.</p>`;
+  openSheet(`<h3>📲 Install Paisa Desk</h3>${steps}
+    <label class="f">App link</label><div class="row"><input type="text" readonly value="${esc(link)}" id="instLink"><button class="btn sm" id="copyLink">Copy</button></div>
+    <div class="row" style="margin-top:14px"><span class="grow"></span><button class="btn pri" data-act="close">OK</button></div>`);
+  $('#copyLink').onclick = async () => { try { await navigator.clipboard.writeText(link); toast('Link copied'); } catch { $('#instLink').select(); } };
 }
 function lockNow() { Store.lock(); db = null; ui.pending = []; showLock(); }
 document.addEventListener('visibilitychange', () => {
@@ -645,6 +678,7 @@ function settingsSheet() {
     <div class="row wrap"><button class="btn" data-act="backup">Download backup</button><button class="btn" data-act="restore">Restore backup</button><input type="file" id="restoreIn" accept=".json,application/json" hidden></div>
     <h3 style="margin-top:16px;font-size:15px">Security</h3>
     <div class="row wrap"><button class="btn" data-act="changePass">Change passcode</button><button class="btn danger" data-act="wipe">Erase all data</button></div>
+    ${isInstalled() ? '' : '<div style="margin-top:16px"><button class="btn" data-act="install">📲 Install on this phone</button></div>'}
     <p class="tiny muted" style="margin-top:14px">Paisa Desk ${APP_VERSION}. Statements are read inside this app on this device; nothing is sent to any server. Data is stored encrypted (AES-256) in this browser and locks after 3 minutes in the background. ${db.txns.length} entries, ${db.loans.length} loans.</p>`);
 }
 function download(name, text) {
@@ -673,6 +707,7 @@ document.addEventListener('click', async e => {
     case 'close': closeSheet(); break;
     case 'lock': lockNow(); break;
     case 'settings': settingsSheet(); break;
+    case 'install': installApp(); break;
     case 'go': closeSheet(true); go(el.dataset.tab); break;
     case 'mPrev': ui.month = ymAdd(ui.month, -1); render(); break;
     case 'mNext': ui.month = ymAdd(ui.month, 1); render(); break;
